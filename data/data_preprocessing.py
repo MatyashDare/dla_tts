@@ -16,6 +16,7 @@ from torch.nn.utils.rnn import pad_sequence
 from dataclasses import dataclass
 
 
+# --- LJSpeechDataset --- 
 class LJSpeechDataset(torchaudio.datasets.LJSPEECH):
 
     def __init__(self, root):
@@ -35,14 +36,11 @@ class LJSpeechDataset(torchaudio.datasets.LJSPEECH):
         return waveform, waveforn_length, transcript, tokens, token_lengths, duration_multiplayers
 
     def decode(self, tokens, lengths):
-        result = []
+        ans = []
         for tokens_, length in zip(tokens, lengths):
-            text = "".join([
-                self._tokenizer.tokens[token]
-                for token in tokens_[:length]
-            ])
-            result.append(text)
-        return result
+            sentence = "".join([self._tokenizer.tokens[tok] for tok in tokens_[:length]])
+            ans.append(sentence)
+        return ans
     
     
 @dataclass
@@ -67,6 +65,7 @@ class Segment:
         return self.end - self.start
 
 
+# --- GraphemeAligner --- 
 class GraphemeAligner(nn.Module):
 
     def __init__(self):
@@ -222,62 +221,32 @@ class Batch:
         raise NotImplementedError
 
 
+# --- LJSpeechCollato --- 
 class LJSpeechCollator:
-    def __init__(self, device='cpu', aligner_mode='sasha'):
+    def __init__(self, device='cpu'):
         self.device = device
-        self.aligner_mode = aligner_mode
-        if aligner_mode == 'sasha':
-            self.aligner = GraphemeAligner().to(device)
         self.featurizer = MelSpectrogram(MelSpectrogramConfig()).to(device)
         self.hop_length = MelSpectrogramConfig().hop_length
 
     def __call__(self, instances: List[Tuple]) -> Dict:
         waveform, waveforn_length, transcript, tokens, token_lengths, fp_duration_multiplayers = list(
-            zip(*instances)
-        )
-        waveform = pad_sequence([
-            waveform_[0] for waveform_ in waveform
-        ]).transpose(0, 1).to(self.device)
+            zip(*instances))
+        waveform = pad_sequence([waveform_[0] for waveform_ in waveform]).transpose(0, 1).to(self.device)
         waveforn_length = torch.cat(waveforn_length)
-
-        tokens = pad_sequence([
-            tokens_[0] for tokens_ in tokens
-        ]).transpose(0, 1).to(self.device)
+        tokens = pad_sequence([tokens_[0] for tokens_ in tokens]).transpose(0, 1).to(self.device)
         token_lengths = torch.cat(token_lengths)
-        if self.aligner_mode == 'sasha':
-            melspec_length = waveforn_length // self.hop_length + 1
-            durations = self.aligner(
-                waveform, waveforn_length, transcript
-            )
-            durations = durations / durations.sum(1)[:, None]
-            melspec = self.featurizer(waveform)
-            token_padded_length = tokens.shape[1]
-            durations = durations[:, :token_padded_length]
-            melspec_padded_length = melspec.shape[2]
-            duration_multipliers = durations * melspec_length[:, None]
-            duration_multipliers = duration_multipliers.round().int()
-
-
-            error = melspec_length - duration_multipliers.sum(1)
-            error_shift = (torch.arange(token_padded_length)[None, :] < torch.abs(error)[:, None]).int() * torch.sign(error)[:, None]
-            duration_multipliers += error_shift
-        else:
-            duration_multipliers = fp_duration_multiplayers
-            duration_multipliers = pad_sequence([dur for dur in duration_multipliers]).transpose(0, 1).to(self.device)
-            melspec_length = waveforn_length // self.hop_length + 1
-            melspec = self.featurizer(waveform)
-            duration_multipliers = duration_multipliers[:, :tokens.shape[1]]
-            tokens = tokens[:, :duration_multipliers.shape[1]]
-            melspec = melspec[:, :, :duration_multipliers.sum(1).max()]
-            
-        return {"waveform" : waveform,
-                "waveforn_length" : waveforn_length.to(self.device),
-                "melspec" : melspec,
+        duration_multipliers = pad_sequence([dur for dur in fp_duration_multipliers]).transpose(0, 1).to(self.device)
+        melspec = self.featurizer(waveform)
+        duration_multipliers = duration_multipliers[:, :tokens.shape[1]]
+        d = {"waveform" : waveform,
+                "waveforn_length" : waveforn_length // self.hop_length + 1.to(self.device),
+                "melspec" : melspec[:, :, :duration_multipliers.sum(1).max()],
                 "melspec_length" : melspec_length.to(self.device),
                 "transcript" : transcript,
-                "tokens" : tokens,
+                "tokens" : tokens[:, :duration_multipliers.shape[1]],
                 "token_lengths" : token_lengths.to(self.device),
                 "duration_multipliers" : duration_multipliers.to(self.device)}
+        return d
 
     
     
